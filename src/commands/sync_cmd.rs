@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 use crate::api::client::MondayClient;
 use crate::config::Config;
@@ -18,7 +18,8 @@ pub async fn push(
         let result = push::push_single(client, cfg, id).await?;
         output::success(&result)
     } else {
-        bail!("specify a <beads-id> or --epic <beads-id> to push")
+        let result = push::push_all(client, cfg).await?;
+        output::success(&result)
     }
 }
 
@@ -35,16 +36,28 @@ pub async fn pull(
         let result = pull::pull_single(client, cfg, id).await?;
         output::success(&result)
     } else {
-        bail!("specify a <monday-item-id> or --parent <monday-item-id> to pull")
+        let result = pull::pull_all(client, cfg).await?;
+        output::success(&result)
     }
+}
+
+pub async fn full_sync(client: &MondayClient, cfg: &Config) -> Result<()> {
+    let pull_result = pull::pull_all(client, cfg).await?;
+    let push_result = push::push_all(client, cfg).await?;
+    let combined = serde_json::json!({
+        "pull": pull_result,
+        "push": push_result,
+    });
+    output::success(&combined)
 }
 
 pub async fn update(
     client: &MondayClient,
     cfg: &Config,
     direction: &str,
+    interactive: bool,
 ) -> Result<()> {
-    let result = update::update_linked(client, cfg, direction).await?;
+    let result = update::update_linked(client, cfg, direction, interactive).await?;
     output::success(&result)
 }
 

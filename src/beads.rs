@@ -17,6 +17,8 @@ pub struct BeadsIssue {
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,
+    #[serde(default)]
+    pub dependency_count: u32,
     pub dependencies: Option<Vec<BeadsDependency>>,
 }
 
@@ -29,11 +31,17 @@ fn default_issue_type() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BeadsDependency {
-    pub issue_id: String,
-    pub depends_on_id: String,
-    #[serde(rename = "type")]
-    pub dep_type: String,
-    pub created_at: String,
+    /// When bd show returns the depended-on issue inline, this is its id.
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub issue_id: Option<String>,
+    #[serde(default)]
+    pub depends_on_id: Option<String>,
+    #[serde(rename = "type", alias = "dependency_type", default)]
+    pub dep_type: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 pub struct BeadsCli {
@@ -113,6 +121,13 @@ impl BeadsCli {
 
     pub fn show(&self, issue_id: &str) -> Result<BeadsIssue> {
         let val = self.run_bd(&["show", issue_id, "--json"])?;
+        if let Some(arr) = val.as_array() {
+            let first = arr
+                .first()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("bd show returned empty array for {issue_id}"))?;
+            return serde_json::from_value(first).context("failed to parse bd show output");
+        }
         serde_json::from_value(val).context("failed to parse bd show output")
     }
 
@@ -180,11 +195,9 @@ pub fn children_of_epic(issues: &[BeadsIssue], epic_id: &str) -> Vec<BeadsIssue>
     issues
         .iter()
         .filter(|i| {
-            if let Some(deps) = &i.dependencies {
-                deps.iter().any(|d| d.depends_on_id == epic_id)
-            } else {
-                false
-            }
+            i.dependencies.as_ref().map_or(false, |deps| {
+                deps.iter().any(|d| dependency_refs_epic(d, epic_id))
+            })
         })
         .cloned()
         .collect()
@@ -195,15 +208,20 @@ pub fn is_hierarchical_child(issue_id: &str, epic_id: &str) -> bool {
     issue_id.starts_with(&format!("{epic_id}."))
 }
 
-/// Get children including hierarchical IDs.
+/// True if this dependency references the given epic (id or depends_on_id).
+pub fn dependency_refs_epic(d: &BeadsDependency, epic_id: &str) -> bool {
+    d.id.as_deref() == Some(epic_id) || d.depends_on_id.as_deref() == Some(epic_id)
+}
+
+/// Get children including hierarchical IDs and dependency references.
 pub fn all_children(issues: &[BeadsIssue], epic_id: &str) -> Vec<BeadsIssue> {
     issues
         .iter()
         .filter(|i| {
             is_hierarchical_child(&i.id, epic_id)
-                || i.dependencies
-                    .as_ref()
-                    .map_or(false, |deps| deps.iter().any(|d| d.depends_on_id == epic_id))
+                || i.dependencies.as_ref().map_or(false, |deps| {
+                    deps.iter().any(|d| dependency_refs_epic(d, epic_id))
+                })
         })
         .cloned()
         .collect()

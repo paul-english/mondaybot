@@ -37,7 +37,7 @@ pub async fn add(
 
     let now = chrono::Utc::now().to_rfc3339();
     mapping.add(MappingEntry {
-        beads_id: beads_id.to_string(),
+        beads_id: issue.id.clone(),
         monday_item_id: monday_item_id.to_string(),
         is_subitem,
         parent_monday_id: None,
@@ -47,7 +47,7 @@ pub async fn add(
 
     output::success(&json!({
         "linked": {
-            "beads_id": beads_id,
+            "beads_id": issue.id,
             "beads_title": issue.title,
             "monday_item_id": monday_item_id,
             "monday_item_name": monday_item.name,
@@ -57,9 +57,15 @@ pub async fn add(
 
 pub fn remove(beads_id: &str) -> Result<()> {
     let mut mapping = SyncMapping::load_default()?;
-    if mapping.remove_by_beads_id(beads_id) {
+    let canonical_id = BeadsCli::from_cwd()
+        .show(beads_id)
+        .map(|i| i.id)
+        .unwrap_or_else(|_| beads_id.to_string());
+    let removed = mapping.remove_by_beads_id(&canonical_id)
+        || (canonical_id != beads_id && mapping.remove_by_beads_id(beads_id));
+    if removed {
         mapping.save_default()?;
-        output::success(&json!({ "unlinked": beads_id }))
+        output::success(&json!({ "unlinked": canonical_id }))
     } else {
         output::error_json(&format!("no link found for beads id: {beads_id}"))
     }

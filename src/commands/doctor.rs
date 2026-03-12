@@ -166,11 +166,23 @@ pub async fn run(config_path: Option<&Path>) -> Result<()> {
     let mapping_path = SyncMapping::default_path();
     if mapping_path.exists() {
         match SyncMapping::load(&mapping_path) {
-            Ok(m) => checks.push(Check::new(
-                "mapping_file",
-                "info",
-                format!("{} linked items", m.entries.len()),
-            )),
+            Ok(m) => {
+                checks.push(Check::new(
+                    "mapping_file",
+                    "info",
+                    format!("{} linked items", m.entries.len()),
+                ));
+                if !m.entries.is_empty() && cfg.status_column.is_none() {
+                    checks.push(
+                        Check::new(
+                            "status_column",
+                            "warn",
+                            "not set; status will not sync to monday.com",
+                        )
+                        .with_hint("Set the status column by name or id: mondaybot config set status_column \"Status\""),
+                    );
+                }
+            }
             Err(e) => checks.push(Check::new(
                 "mapping_file",
                 "warn",

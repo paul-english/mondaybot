@@ -1,12 +1,14 @@
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::json;
+use std::io::{self, Write};
 
 use crate::api::client::MondayClient;
 use crate::api::queries;
-use crate::api::types::{Item, SingleItemResponse};
+use crate::api::types::{Item, ItemBoardResponse, SingleItemResponse};
 use crate::beads::BeadsCli;
 use crate::config::Config;
+use crate::sync::columns;
 use crate::sync::mapping::{MappingEntry, SyncMapping};
 
 #[derive(Serialize)]
@@ -60,11 +62,58 @@ fn column_text(item: &Item, col_id: &str) -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
+async fn board_id_for_update(
+    client: &MondayClient,
+    entry: &MappingEntry,
+    default_board_id: u64,
+) -> u64 {
+    if !entry.is_subitem {
+        return default_board_id;
+    }
+    let resp: ItemBoardResponse = match client
+        .query(queries::GET_ITEM_BOARD, json!({ "itemId": [&entry.monday_item_id] }))
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return default_board_id,
+    };
+    resp.items
+        .into_iter()
+        .next()
+        .and_then(|i| i.board)
+        .and_then(|b| b.id.parse().ok())
+        .unwrap_or(default_board_id)
+}
+
+fn prompt_resolve_conflict(
+    beads_id: &str,
+    monday_item_id: &str,
+    field: &str,
+    beads_value: &str,
+    monday_value: &str,
+) -> Result<String> {
+    let _ = io::stderr().write_fmt(format_args!(
+        "Item {} / {}: {} beads={} monday={}. (b)eads / (m)onday / (s)kip? ",
+        beads_id, monday_item_id, field, beads_value, monday_value
+    ));
+    let _ = io::stderr().flush();
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    let ch = line.trim().chars().next().unwrap_or('b');
+    let choice = match ch {
+        'm' => "m",
+        's' => "s",
+        _ => "b",
+    };
+    Ok(choice.to_string())
+}
+
 /// Refresh all already-linked items. Never creates anything.
 pub async fn update_linked(
     client: &MondayClient,
     cfg: &Config,
     direction: &str,
+    interactive: bool,
 ) -> Result<UpdateResult> {
     let bd = BeadsCli::from_cwd();
     let mut mapping = SyncMapping::load_default()?;
@@ -121,9 +170,23 @@ pub async fn update_linked(
             }
         };
 
+        let default_board_id = match cfg.require_board_id() {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
+        let update_board_id =
+            board_id_for_update(client, entry, default_board_id).await;
+        let status_col_id = if let Some(ref_) = &cfg.status_column {
+            columns::resolve_column_id(client, update_board_id, ref_)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+
         // Compare status
-        let monday_status = cfg
-            .status_column
+        let monday_status = status_col_id
             .as_ref()
             .and_then(|col| column_text(&monday_item, col))
             .unwrap_or_default();
@@ -154,39 +217,116 @@ pub async fn update_linked(
         // Status sync
         if statuses_differ {
             if do_push && do_pull {
-                // Both sides differ — conflict. Beads wins.
-                let board_id = cfg.require_board_id()?;
-                if let Some(status_col) = &cfg.status_column {
-                    let col_vals = json!({ status_col: { "label": status_label } }).to_string();
-                    let vars = json!({
-                        "boardId": board_id,
-                        "itemId": &entry.monday_item_id,
-                        "columnValues": col_vals,
-                    });
-                    let _ = client
-                        .query::<serde_json::Value>(queries::UPDATE_ITEM, vars)
-                        .await;
+                // Both sides differ — conflict.
+                let choice = if interactive {
+                    prompt_resolve_conflict(
+                        &entry.beads_id,
+                        &entry.monday_item_id,
+                        "status",
+                        &beads_status,
+                        &monday_beads_status,
+                    )?
+                } else {
+                    "b".to_string()
+                };
+
+                match choice.as_str() {
+                    "m" => {
+                        if monday_beads_status == "closed" {
+                            let _ = bd.close(&entry.beads_id, Some("synced from monday.com"));
+                        } else {
+                            let _ = bd.update_status(&entry.beads_id, &monday_beads_status);
+                        }
+                        result.conflicts.push(ConflictAction {
+                            beads_id: entry.beads_id.clone(),
+                            monday_item_id: entry.monday_item_id.clone(),
+                            field: "status".into(),
+                            beads_value: beads_status.clone(),
+                            monday_value: monday_beads_status.clone(),
+                            resolved: "monday_wins".into(),
+                        });
+                    }
+                    "s" => {
+                        result.conflicts.push(ConflictAction {
+                            beads_id: entry.beads_id.clone(),
+                            monday_item_id: entry.monday_item_id.clone(),
+                            field: "status".into(),
+                            beads_value: beads_status.clone(),
+                            monday_value: monday_beads_status.clone(),
+                            resolved: "skipped".into(),
+                        });
+                    }
+                    _ => {
+                        if let (Some(status_col), Some(status_ref)) =
+                            (&status_col_id, &cfg.status_column)
+                        {
+                            if let Ok(label_to_index) = columns::status_label_to_index(
+                                client,
+                                update_board_id,
+                                status_ref,
+                            )
+                            .await
+                            {
+                                if let Some(idx) =
+                                    columns::status_index_for_label(&label_to_index, &status_label)
+                                {
+                                    let mut col_obj = serde_json::Map::new();
+                                    col_obj.insert(
+                                        status_col.clone(),
+                                        serde_json::json!({ "index": idx }),
+                                    );
+                                    let col_vals = serde_json::Value::Object(col_obj).to_string();
+                                    let vars = json!({
+                                        "boardId": update_board_id,
+                                        "itemId": &entry.monday_item_id,
+                                        "columnValues": col_vals,
+                                    });
+                                    let _ = client
+                                        .query::<serde_json::Value>(queries::UPDATE_ITEM, vars)
+                                        .await;
+                                }
+                            }
+                        }
+                        result.conflicts.push(ConflictAction {
+                            beads_id: entry.beads_id.clone(),
+                            monday_item_id: entry.monday_item_id.clone(),
+                            field: "status".into(),
+                            beads_value: beads_status.clone(),
+                            monday_value: monday_beads_status.clone(),
+                            resolved: "beads_wins".into(),
+                        });
+                    }
                 }
-                result.conflicts.push(ConflictAction {
-                    beads_id: entry.beads_id.clone(),
-                    monday_item_id: entry.monday_item_id.clone(),
-                    field: "status".into(),
-                    beads_value: beads_status.clone(),
-                    monday_value: monday_beads_status.clone(),
-                    resolved: "beads_wins".into(),
-                });
             } else if do_push {
-                let board_id = cfg.require_board_id()?;
-                if let Some(status_col) = &cfg.status_column {
-                    let col_vals = json!({ status_col: { "label": status_label } }).to_string();
-                    let vars = json!({
-                        "boardId": board_id,
-                        "itemId": &entry.monday_item_id,
-                        "columnValues": col_vals,
-                    });
-                    let _ = client
-                        .query::<serde_json::Value>(queries::UPDATE_ITEM, vars)
-                        .await;
+                if let (Some(status_col), Some(status_ref)) =
+                    (&status_col_id, &cfg.status_column)
+                {
+                    if let Ok(label_to_index) = columns::status_label_to_index(
+                        client,
+                        update_board_id,
+                        status_ref,
+                    )
+                    .await
+                    {
+                        if let Some(idx) =
+                            columns::status_index_for_label(&label_to_index, &status_label)
+                        {
+                            let mut col_obj = serde_json::Map::new();
+                            col_obj.insert(
+                                status_col.clone(),
+                                serde_json::json!({ "index": idx }),
+                            );
+                            let col_vals = serde_json::Value::Object(col_obj).to_string();
+                            let vars = json!({
+                                "boardId": update_board_id,
+                                "itemId": &entry.monday_item_id,
+                                "columnValues": col_vals,
+                            });
+                            let _ = client
+                                .query::<serde_json::Value>(queries::UPDATE_ITEM, vars)
+                                .await;
+                        }
+                    }
                 }
                 result.updated.push(UpdateAction {
                     beads_id: entry.beads_id.clone(),
@@ -277,8 +417,22 @@ pub async fn status(client: &MondayClient, cfg: &Config) -> Result<serde_json::V
             }
         };
 
-        let monday_status = cfg
-            .status_column
+        let default_board_id = match cfg.require_board_id() {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
+        let update_board_id =
+            board_id_for_update(client, entry, default_board_id).await;
+        let status_col_id = if let Some(ref_) = &cfg.status_column {
+            columns::resolve_column_id(client, update_board_id, ref_)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+
+        let monday_status = status_col_id
             .as_ref()
             .and_then(|col| column_text(&monday_item, col))
             .unwrap_or_default();

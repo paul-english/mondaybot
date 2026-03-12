@@ -17,7 +17,7 @@ This project uses **mondaybot** to sync beads issues with monday.com.
 #### Key Principle: Sync is Opt-In
 - Only **explicitly linked** issues sync between beads and monday.com
 - Running `mondaybot sync update` is always safe — it never creates items, only refreshes linked ones
-- Use `mondaybot sync push <beads-id>` to selectively push a beads issue to monday
+- Use `mondaybot sync sync` for full bidirectional sync (pull with discovery, then push with discovery); new sub-items on either side get synced
 - Use `mondaybot link add <beads-id> <monday-item-id>` to tie existing items together
 
 #### Quick Reference
@@ -35,10 +35,12 @@ mondaybot link add <beads-id> <monday-item-id>    # Link a beads issue to a mond
 mondaybot link list                               # Show all links
 mondaybot link remove <beads-id>                  # Unlink
 
+mondaybot sync sync                               # Full sync: pull then push (discovers new sub-items)
 mondaybot sync push <beads-id>                    # Push one issue to monday (creates if new)
 mondaybot sync push --epic <beads-id>             # Push epic + child tasks
 mondaybot sync pull <monday-item-id>              # Pull one item into beads (creates if new)
 mondaybot sync update                             # Refresh all linked items (safe, no creates)
+mondaybot sync update -i                         # Same, but prompt to resolve status conflicts
 mondaybot sync status                             # Show what's linked and what's drifted
 ```
 
@@ -73,7 +75,7 @@ This project uses **mondaybot** to sync beads issues with monday.com.
 ## Key Principle: Sync is Opt-In
 - Only **explicitly linked** issues sync between beads and monday.com
 - Running `mondaybot sync update` is always safe — it never creates items, only refreshes linked ones
-- Use `mondaybot sync push <beads-id>` to selectively push a beads issue to monday
+- Use `mondaybot sync sync` for full bidirectional sync (pull with discovery, then push); new sub-items on either side get synced
 - Use `mondaybot link add <beads-id> <monday-item-id>` to tie existing items together
 
 ## Quick Reference
@@ -91,10 +93,12 @@ mondaybot link add <beads-id> <monday-item-id>    # Link a beads issue to a mond
 mondaybot link list                               # Show all links
 mondaybot link remove <beads-id>                  # Unlink
 
+mondaybot sync sync                               # Full sync: pull then push (discovers new sub-items)
 mondaybot sync push <beads-id>                    # Push one issue to monday (creates if new)
 mondaybot sync push --epic <beads-id>             # Push epic + child tasks
 mondaybot sync pull <monday-item-id>              # Pull one item into beads (creates if new)
 mondaybot sync update                             # Refresh all linked items (safe, no creates)
+mondaybot sync update -i                         # Same, but prompt to resolve status conflicts
 mondaybot sync status                             # Show what's linked and what's drifted
 ```
 

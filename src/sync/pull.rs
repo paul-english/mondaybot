@@ -4,9 +4,10 @@ use serde_json::json;
 
 use crate::api::client::MondayClient;
 use crate::api::queries;
-use crate::api::types::{Item, SingleItemResponse};
+use crate::api::types::{Item, ItemBoardResponse, SingleItemResponse};
 use crate::beads::BeadsCli;
 use crate::config::Config;
+use crate::sync::columns;
 use crate::sync::mapping::{MappingEntry, SyncMapping};
 
 #[derive(Serialize)]
@@ -43,7 +44,7 @@ fn column_text(item: &Item, col_id: &str) -> Option<String> {
 
 /// Pull one monday item into beads. Creates a beads issue if not linked, updates if linked.
 async fn pull_one(
-    _client: &MondayClient,
+    client: &MondayClient,
     cfg: &Config,
     bd: &BeadsCli,
     mapping: &mut SyncMapping,
@@ -58,13 +59,26 @@ async fn pull_one(
         let beads_id = existing.beads_id.clone();
 
         // Try to update beads issue status from monday
-        if let Some(status_col) = &cfg.status_column {
-            if let Some(label) = column_text(item, status_col) {
+        if let Some(status_ref) = &cfg.status_column {
+            let board_id = client
+                .query::<ItemBoardResponse>(queries::GET_ITEM_BOARD, json!({ "itemId": [&item.id] }))
+                .await
+                .ok()
+                .and_then(|r| r.items.into_iter().next())
+                .and_then(|i| i.board)
+                .and_then(|b| b.id.parse().ok());
+            if let Some(bid) = board_id {
+                if let Some(status_col) =
+                    columns::resolve_column_id(client, bid, status_ref).await.ok().flatten()
+                {
+                    if let Some(label) = column_text(item, &status_col) {
                 let beads_status = monday_label_to_beads_status(cfg, &label);
-                if beads_status == "closed" {
-                    let _ = bd.close(&beads_id, Some("synced from monday.com"));
-                } else {
-                    let _ = bd.update_status(&beads_id, &beads_status);
+                        if beads_status == "closed" {
+                            let _ = bd.close(&beads_id, Some("synced from monday.com"));
+                        } else {
+                            let _ = bd.update_status(&beads_id, &beads_status);
+                        }
+                    }
                 }
             }
         }
@@ -101,6 +115,78 @@ async fn pull_one(
         monday_item_id: item.id.clone(),
         name: item.name.clone(),
     })
+}
+
+/// Pull all linked items from monday.com into beads.
+pub async fn pull_all(
+    client: &MondayClient,
+    cfg: &Config,
+) -> Result<PullResult> {
+    let bd = BeadsCli::from_cwd();
+    let mut mapping = SyncMapping::load_default()?;
+    if mapping.board_id == 0 {
+        mapping.board_id = cfg.board_id.unwrap_or(0);
+    }
+
+    let mut result = PullResult {
+        created: vec![],
+        updated: vec![],
+    };
+
+    let entries = mapping.entries.clone();
+    for entry in &entries {
+        let monday_result: Result<SingleItemResponse> = client
+            .query(queries::GET_ITEM, json!({ "itemId": [&entry.monday_item_id] }))
+            .await;
+
+        match monday_result {
+            Ok(resp) => {
+                if let Some(item) = resp.items.into_iter().next() {
+                    let issue_type = if entry.is_subitem { "task" } else { "epic" };
+                    let was_linked = mapping.find_by_monday_id(&item.id).is_some();
+                    match pull_one(client, cfg, &bd, &mut mapping, &item, issue_type, None).await {
+                        Ok(action) => {
+                            if was_linked {
+                                result.updated.push(action);
+                            } else {
+                                result.created.push(action);
+                            }
+                        }
+                        Err(_) => continue,
+                    }
+
+                    let parent_beads_id = mapping
+                        .find_by_monday_id(&item.id)
+                        .map(|e| e.beads_id.clone());
+                    if let (Some(subitems), Some(parent_bid)) = (&item.subitems, parent_beads_id) {
+                        for sub in subitems {
+                            if mapping.find_by_monday_id(&sub.id).is_some() {
+                                continue;
+                            }
+                            match pull_one(
+                                client,
+                                cfg,
+                                &bd,
+                                &mut mapping,
+                                sub,
+                                "task",
+                                Some(&parent_bid),
+                            )
+                            .await
+                            {
+                                Ok(action) => result.created.push(action),
+                                Err(_) => continue,
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+
+    mapping.save_default()?;
+    Ok(result)
 }
 
 /// Pull a single monday item by ID.

@@ -15,13 +15,17 @@ pub struct Config {
     pub status_column: Option<String>,
     #[serde(default = "default_status_map")]
     pub status_map: HashMap<String, String>,
+    pub name_column: Option<String>,
+    pub owner_column: Option<String>,
 }
 
 fn default_status_map() -> HashMap<String, String> {
+    // Labels must match the board's status column exactly (e.g. "To Do", "In Progress", "Done")
     HashMap::from([
-        ("open".into(), "Open".into()),
-        ("in_progress".into(), "Working on it".into()),
+        ("open".into(), "To Do".into()),
+        ("in_progress".into(), "In Progress".into()),
         ("closed".into(), "Done".into()),
+        ("cancelled".into(), "Blocked".into()),
     ])
 }
 
@@ -32,6 +36,8 @@ impl Default for Config {
             board_id: None,
             status_column: None,
             status_map: default_status_map(),
+            name_column: None,
+            owner_column: None,
         }
     }
 }
@@ -104,13 +110,25 @@ impl Config {
     }
 
     pub fn set_value(&mut self, key: &str, value: &str) -> Result<()> {
+        if let Some(beads_status) = key.strip_prefix("status_map.") {
+            if beads_status.is_empty() {
+                bail!("status_map.<beads_status> requires a beads status, e.g. status_map.in_progress");
+            }
+            self.status_map
+                .insert(beads_status.to_string(), value.to_string());
+            return Ok(());
+        }
         match key {
             "api_token" => self.api_token = value.to_string(),
             "board_id" => {
                 self.board_id = Some(value.parse().context("board_id must be a number")?);
             }
             "status_column" => self.status_column = Some(value.to_string()),
-            _ => bail!("unknown config key: {key}. Valid keys: api_token, board_id, status_column"),
+            "name_column" => self.name_column = Some(value.to_string()),
+            "owner_column" => self.owner_column = Some(value.to_string()),
+            _ => bail!(
+                "unknown config key: {key}. Valid keys: api_token, board_id, status_column, name_column, owner_column, status_map.<beads_status> (e.g. status_map.in_progress)"
+            ),
         }
         Ok(())
     }

@@ -193,10 +193,18 @@ enum SyncAction {
         #[arg(long)]
         parent: Option<String>,
     },
+    /// Full sync: pull (with discovery) then push (with discovery)
+    Sync {
+        /// Prompt to resolve conflicts (for future use)
+        #[arg(short, long)]
+        interactive: bool,
+    },
     /// Refresh all already-linked items (never creates anything)
     Update {
         #[arg(long, default_value = "both")]
         direction: String,
+        #[arg(short, long)]
+        interactive: bool,
     },
     /// Show sync status: what's linked, what's drifted
     Status,
@@ -374,8 +382,11 @@ async fn main() {
                     )
                     .await
                 }
-                SyncAction::Update { direction } => {
-                    commands::sync_cmd::update(&client, &cfg, direction).await
+                SyncAction::Sync { interactive: _ } => {
+                    commands::sync_cmd::full_sync(&client, &cfg).await
+                }
+                SyncAction::Update { direction, interactive } => {
+                    commands::sync_cmd::update(&client, &cfg, direction, *interactive).await
                 }
                 SyncAction::Status => commands::sync_cmd::status(&client, &cfg).await,
             }
